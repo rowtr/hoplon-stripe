@@ -1,0 +1,54 @@
+(ns workflow.stripe
+  (:require
+    [cljsjs.stripe]
+    [adzerk.env         :as env]
+    [clojure.set        :as s           :refer [rename-keys]]))
+
+(env/def
+  STRIPE_PUBLIC         :required)
+
+(def pub-key            STRIPE_PUBLIC)
+
+(def stripe-url         "https://js.stripe.com/v2/")
+(defc stripe-loaded?    false)
+(defc stripe-ready?     false)
+(defc trx-state         nil)
+(defc trx-error         nil)
+
+(defn stripe-init [pub-key]
+  (do
+    (.setPublishableKey js/Stripe pub-key)
+    (reset! stripe-ready? true)))
+
+(defn ensure-stripe []
+  (.getScript js/jQuery stripe-url #(reset! stripe-loaded? true)))
+
+(with-init!
+  (ensture-stripe))
+
+(do-watch stripe-loaded? #(stripe-init pub-key))
+
+(defn stripe-response-handler [action deferred data status response]
+  (let [r           (js->clj response :keywordize-keys true)
+        good        (fn [d k r o n]  (when (= (:donation_state n) "complete") (.resolve d)))
+        bad         (fn [d k r o n] (when-not (nil? n) (.reject deferred)))]
+    (add-watch donate-state (keyword (gensym)) (partial good deferred))
+    (add-watch donate-error (keyword (gensym)) (partial bad deferred))
+    (if
+      (= status 200)
+      (action  (merge data {:token {:provider "stripe" :data (js->clj response :keywordize-keys true)}}))
+      (do
+        (reset! donate-error (ex-info (-> r :error :message) {}))))))
+
+(defn transact! [action data]
+  (let [[mo yr]       (split (:card-expiration data) #"/")
+        payload       (assoc data :exp_month mo :exp_year yr)
+        d             (.Deferred js/jQuery)]
+    (.createToken (.-card js/Stripe) (clj->js payload) (partial stripe-response-handler action d data))
+    (.promise d)))
+
+(defprotocol IStripe
+  )
+
+(defrecord StripeMachine
+  [data error state exception loading token pub-key])
